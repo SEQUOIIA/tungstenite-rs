@@ -36,6 +36,24 @@ mod encryption {
             }
         }
     }
+
+    pub fn wrap_stream_unsecure(stream: TcpStream, domain: &str, mode: Mode) -> Result<AutoStream> {
+        match mode {
+            Mode::Plain => Ok(StreamSwitcher::Plain(stream)),
+            Mode::Tls => {
+                let mut builder = TlsConnector::builder();
+                builder.danger_accept_invalid_certs(true);
+                builder.danger_accept_invalid_hostnames(true);
+                let connector = builder.build()?;
+                connector.connect(domain, stream)
+                    .map_err(|e| match e {
+                        TlsHandshakeError::Failure(f) => f.into(),
+                        TlsHandshakeError::WouldBlock(_) => panic!("Bug: TLS handshake not blocked"),
+                    })
+                    .map(StreamSwitcher::Tls)
+            }
+        }
+    }
 }
 
 #[cfg(not(feature="tls"))]
@@ -54,10 +72,15 @@ mod encryption {
             Mode::Tls => Err(Error::Url("TLS support not compiled in.".into())),
         }
     }
+
+    pub fn wrap_stream_unsecure(stream: TcpStream, _domain: &str, mode: Mode) -> Result<AutoStream> {
+        wrap_stream(stream, _domain, mode)
+    }
 }
 
 pub use self::encryption::AutoStream;
 use self::encryption::wrap_stream;
+use self::encryption::wrap_stream_unsecure;
 
 use protocol::WebSocket;
 use handshake::HandshakeError;
@@ -97,6 +120,23 @@ pub fn connect_with_config<'t, Req: Into<Request<'t>>>(
         })
 }
 
+/// Same as the above function "connect_with_config", only if TLS is used, it does not verify if the TLS certificate is trusted.
+pub fn connect_with_config_unsecure<'t, Req: Into<Request<'t>>>(
+    request: Req,
+    config: Option<WebSocketConfig>
+) -> Result<(WebSocket<AutoStream>, Response)> {
+    let request: Request = request.into();
+    let mode = url_mode(&request.url)?;
+    let addrs = request.url.to_socket_addrs()?;
+    let mut stream = connect_to_some_unsecure(addrs, &request.url, mode)?;
+    NoDelay::set_nodelay(&mut stream, true)?;
+    client_with_config(request, stream, config)
+        .map_err(|e| match e {
+            HandshakeError::Failure(f) => f,
+            HandshakeError::Interrupted(_) => panic!("Bug: blocking handshake not blocked"),
+        })
+}
+
 /// Connect to the given WebSocket in blocking mode.
 ///
 /// The URL may be either ws:// or wss://.
@@ -115,6 +155,13 @@ pub fn connect<'t, Req: Into<Request<'t>>>(request: Req)
     connect_with_config(request, None)
 }
 
+/// Same as the above function "connect", only if TLS is used, it does not verify if the TLS certificate is trusted.
+pub fn connect_unsecure<'t, Req: Into<Request<'t>>>(request: Req)
+    -> Result<(WebSocket<AutoStream>, Response)>
+{
+    connect_with_config_unsecure(request, None)
+}
+
 fn connect_to_some<A>(addrs: A, url: &Url, mode: Mode) -> Result<AutoStream>
     where A: Iterator<Item=SocketAddr>
 {
@@ -123,6 +170,21 @@ fn connect_to_some<A>(addrs: A, url: &Url, mode: Mode) -> Result<AutoStream>
         debug!("Trying to contact {} at {}...", url, addr);
         if let Ok(raw_stream) = TcpStream::connect(addr) {
             if let Ok(stream) = wrap_stream(raw_stream, domain, mode) {
+                return Ok(stream)
+            }
+        }
+    }
+    Err(Error::Url(format!("Unable to connect to {}", url).into()))
+}
+
+fn connect_to_some_unsecure<A>(addrs: A, url: &Url, mode: Mode) -> Result<AutoStream>
+    where A: Iterator<Item=SocketAddr>
+{
+    let domain = url.host_str().ok_or_else(|| Error::Url("No host name in the URL".into()))?;
+    for addr in addrs {
+        debug!("Trying to contact {} at {}...", url, addr);
+        if let Ok(raw_stream) = TcpStream::connect(addr) {
+            if let Ok(stream) = wrap_stream_unsecure(raw_stream, domain, mode) {
                 return Ok(stream)
             }
         }

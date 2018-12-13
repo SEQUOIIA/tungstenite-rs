@@ -30,7 +30,7 @@ pub mod handshake;
 pub mod stream;
 pub mod util;
 
-pub use client::{connect, client};
+pub use client::{connect, client, connect_unsecure};
 pub use server::{accept, accept_hdr};
 pub use error::{Error, Result};
 pub use protocol::{WebSocket, Message};
